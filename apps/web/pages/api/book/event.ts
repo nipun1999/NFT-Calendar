@@ -292,16 +292,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   const teamMemberPromises =
     eventType.schedulingType === SchedulingType.COLLECTIVE
       ? users.slice(1).map(async function (user) {
-          return {
-            email: user.email || "",
-            name: user.name || "",
-            timeZone: user.timeZone,
-            language: {
-              translate: await getTranslation(user.locale ?? "en", "common"),
-              locale: user.locale ?? "en",
-            },
-          };
-        })
+        return {
+          email: user.email || "",
+          name: user.name || "",
+          timeZone: user.timeZone,
+          language: {
+            translate: await getTranslation(user.locale ?? "en", "common"),
+            locale: user.locale ?? "en",
+          },
+        };
+      })
       : [];
 
   const teamMembers = await Promise.all(teamMemberPromises);
@@ -361,6 +361,63 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
       await verifyAccount(web3Details.userSignature, web3Details.userWallet);
     }
 
+    let event = [] as any;
+    let nft_url = [] as any;
+    req.body.metadata.user_nft.forEach((nft_obj) => {
+      event.push(nft_obj.name);
+      nft_url.push(nft_obj.url);
+    });
+
+    console.log(event);
+    console.log(nft_url);
+
+    const usedNFTS = await prisma.nfts.findMany({
+      where: {
+        event: { in: event },
+        url: { in: nft_url },
+      },
+    });
+
+    let used_events = [] as any;
+    let used_nfts = [] as any;
+
+    usedNFTS.forEach((nft) => {
+      used_events.push(nft.event);
+      used_nfts.push(nft.url);
+    });
+
+    let unused_event = null;
+    let unused_nft_url = null;
+
+    req.body.metadata.user_nft.forEach((user_nft) => {
+      if (!used_events.includes(user_nft.event) && !used_nfts.includes(user_nft.url)) {
+        unused_event = user_nft.event;
+        unused_nft_url = user_nft.nft_url;
+      }
+    });
+
+    if (unused_event == null && unused_nft_url == null) {
+      res.status(400).json({ message: "The NFTs present in wallet are already used for the booking" });
+      return;
+    }
+
+    try {
+      await prisma.nfts.create({
+        data: {
+          event: event[0],
+          url: nft_url[0],
+          user: {
+            connect: {
+              id: users[0].id,
+            },
+          },
+        },
+      });
+    } catch (err) {
+      res.status(500).json({ message: "Error while persisting NFT data in DB" });
+      return;
+    }
+
     return prisma.booking.create({
       include: {
         user: {
@@ -403,8 +460,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         },
         destinationCalendar: evt.destinationCalendar
           ? {
-              connect: { id: evt.destinationCalendar.id },
-            }
+            connect: { id: evt.destinationCalendar.id },
+          }
           : undefined,
       },
     });

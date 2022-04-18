@@ -1,5 +1,8 @@
 import { CalendarIcon, ClockIcon, CreditCardIcon, ExclamationIcon } from "@heroicons/react/solid";
+import { getParsedNftAccountsByOwner, isValidSolanaAddress, createConnectionConfig } from "@nfteyez/sol-rayz";
 import { EventTypeCustomInputType } from "@prisma/client";
+import { Transaction, clusterApiUrl, PublicKey } from "@solana/web3.js";
+import axios from "axios";
 import { useContracts } from "contexts/contractsContext";
 import dayjs from "dayjs";
 import { useSession } from "next-auth/react";
@@ -51,6 +54,31 @@ type BookingFormValues = {
     [key: string]: string;
   };
 };
+
+type DisplayEncoding = "utf8" | "hex";
+type PhantomEvent = "disconnect" | "connect" | "accountChanged";
+type PhantomRequestMethod =
+  | "connect"
+  | "disconnect"
+  | "signTransaction"
+  | "signAllTransactions"
+  | "signMessage";
+
+interface ConnectOpts {
+  onlyIfTrusted: boolean;
+}
+
+interface PhantomProvider {
+  publicKey: PublicKey | null;
+  isConnected: boolean | null;
+  signTransaction: (transaction: Transaction) => Promise<Transaction>;
+  signAllTransactions: (transactions: Transaction[]) => Promise<Transaction[]>;
+  signMessage: (message: Uint8Array | string, display?: DisplayEncoding) => Promise<any>;
+  connect: (opts?: Partial<ConnectOpts>) => Promise<{ publicKey: PublicKey }>;
+  disconnect: () => Promise<void>;
+  on: (event: PhantomEvent, handler: (args: any) => void) => void;
+  request: (method: PhantomRequestMethod, params: any) => Promise<unknown>;
+}
 
 const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
   const { t, i18n } = useLocale();
@@ -106,11 +134,110 @@ const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
     },
   });
 
+  const [provider, setProvider] = useState<PhantomProvider | undefined>(undefined);
+  const [walletKey, setWalletKey] = useState<PhantomProvider | undefined>(undefined);
+
+  /**
+   * @description gets Phantom provider, if it exists
+   */
+  const getProvider = (): PhantomProvider | undefined => {
+    if ("solana" in window) {
+      // @ts-ignore
+      const provider = window.solana as any;
+      if (provider.isPhantom) return provider as PhantomProvider;
+    }
+  };
+
+  /**
+   * @description prompts user to connect wallet if it exists
+   */
+  const connectWallet = async () => {
+    // @ts-ignore
+    const { solana } = window;
+
+    if (solana) {
+      try {
+        const response = await solana.connect();
+        console.log("wallet account ", response.publicKey.toString());
+        setWalletKey(response.publicKey.toString());
+      } catch (err) {
+        // { code: 4001, message: 'User rejected the request.' }
+      }
+    }
+  };
+
+  /**
+   * @description disconnect Phantom wallet
+   */
+  const disconnectWallet = async () => {
+    // @ts-ignore
+    const { solana } = window;
+
+    if (walletKey && solana) {
+      await (solana as PhantomProvider).disconnect();
+      setWalletKey(undefined);
+    }
+    setNFTError(false);
+  };
+
+  const getNFTDetailedData = async (creatorAddress, eventName, nftData) => {
+    const validNftsData: Array<any> = [];
+    for (const nft of nftData) {
+      const creators = nft.data.creators;
+      for (const creator of creators) {
+        if (creator.address == creatorAddress && creator.verified == 1 && nft.data.name === eventName) {
+          let nft_data = await axios.get(nft.data.uri);
+          validNftsData.push({ name: nft_data.data.name, url: nft.data.uri });
+        }
+      }
+    }
+    return validNftsData;
+  };
+
+  const getValidNFTData = async (nftData) => {
+    try {
+      const creatorAddress = "96xtaLxJV9tribdMwjy7FgMJbMX1R3UYqd89qKUdmfDR";
+      const eventName = "Test Event";
+      const validNfts = [] as any;
+      let validNftsData;
+      if (nftData) {
+        validNftsData = await getNFTDetailedData(creatorAddress, eventName, nftData);
+      }
+      return validNftsData;
+    } catch (error) {
+      console.log(error);
+    }
+  };
+
+  const getNFTData = async () => {
+    try {
+      if (walletKey) {
+        const connect = createConnectionConfig(clusterApiUrl("devnet"));
+        const nfts = await getParsedNftAccountsByOwner({
+          publicAddress: walletKey.toString(),
+          connection: connect,
+        });
+        return nfts;
+      }
+    } catch (error) {
+      console.log(error);
+    }
+  };
+
+  useEffect(() => {
+    const provider = getProvider();
+
+    if (provider) setProvider(provider);
+    else setProvider(undefined);
+  }, []);
+
   const rescheduleUid = router.query.rescheduleUid as string;
   const { isReady, Theme } = useTheme(profile.theme);
   const date = asStringOrNull(router.query.date);
 
   const [guestToggle, setGuestToggle] = useState(booking && booking.attendees.length > 1);
+
+  const [validNFTError, setNFTError] = useState(false);
 
   const eventTypeDetail = { isWeb3Active: false, ...eventType };
 
@@ -207,6 +334,55 @@ const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
     }
   };
 
+  let walletComponent;
+  let confirmationComponent;
+
+  if (provider) {
+    if (walletKey) {
+      walletComponent = (
+        <button
+          type="button"
+          onClick={disconnectWallet}
+          className="my-2 whitespace-nowrap rounded-md border border-transparent bg-purple-500 py-2 px-4 text-sm font-medium text-white hover:bg-opacity-75">
+          Disconnect from Phantom
+        </button>
+      );
+      confirmationComponent = (
+        <div className="flex items-start space-x-2 rtl:space-x-reverse">
+          <Button
+            type="submit"
+            data-testid={rescheduleUid ? "confirm-reschedule-button" : "confirm-book-button"}
+            loading={mutation.isLoading}>
+            {rescheduleUid ? t("reschedule") : t("confirm")}
+          </Button>
+          <Button color="secondary" type="button" onClick={() => router.back()}>
+            {t("cancel")}
+          </Button>
+        </div>
+      );
+    } else {
+      walletComponent = (
+        <button
+          type="button"
+          onClick={connectWallet}
+          className="whitespace-nowrap rounded-md border border-transparent bg-purple-500 py-2 px-4 text-sm font-medium text-white hover:bg-opacity-75">
+          Connect to Phantom
+        </button>
+      );
+      confirmationComponent = null;
+    }
+  } else {
+    walletComponent = (
+      <a
+        href="https://phantom.app/"
+        target="_blank"
+        className="rounded-md border border-transparent bg-purple-500 px-4 py-2 text-base font-medium text-white"
+        rel="noreferrer">
+        Get Phantom
+      </a>
+    );
+  }
+
   const parseDate = (date: string | null) => {
     if (!date) return "No date";
     const parsedZone = parseZone(date);
@@ -215,7 +391,8 @@ const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
     return formattedTime + ", " + dayjs(date).toDate().toLocaleString(i18n.language, { dateStyle: "full" });
   };
 
-  const bookEvent = (booking: BookingFormValues) => {
+  const bookEvent = async (booking: BookingFormValues) => {
+    console.log("add changes for validation heree");
     telemetry.withJitsu((jitsu) =>
       jitsu.track(telemetryEventTypes.bookingConfirmed, collectPageParameters())
     );
@@ -243,25 +420,34 @@ const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
       };
     }
 
-    mutation.mutate({
-      ...booking,
-      web3Details,
-      start: dayjs(date).format(),
-      end: dayjs(date).add(eventType.length, "minute").format(),
-      eventTypeId: eventType.id,
-      timeZone: timeZone(),
-      language: i18n.language,
-      rescheduleUid,
-      user: router.query.user,
-      location: getLocationValue(
-        booking.locationType ? booking : { ...booking, locationType: selectedLocation }
-      ),
-      metadata,
-      customInputs: Object.keys(booking.customInputs || {}).map((inputId) => ({
-        label: eventType.customInputs.find((input) => input.id === parseInt(inputId))!.label,
-        value: booking.customInputs![inputId],
-      })),
-    });
+    const nftsData = await getNFTData();
+    const validNftsData = await getValidNFTData(nftsData);
+
+    // fetch all NFTs and if creator NFT found -> proceed else return error
+    if (validNftsData && validNftsData.length > 0) {
+      metadata["user_nft"] = validNftsData;
+      mutation.mutate({
+        ...booking,
+        web3Details,
+        start: dayjs(date).format(),
+        end: dayjs(date).add(eventType.length, "minute").format(),
+        eventTypeId: eventType.id,
+        timeZone: timeZone(),
+        language: i18n.language,
+        rescheduleUid,
+        user: router.query.user,
+        location: getLocationValue(
+          booking.locationType ? booking : { ...booking, locationType: selectedLocation }
+        ),
+        metadata,
+        customInputs: Object.keys(booking.customInputs || {}).map((inputId) => ({
+          label: eventType.customInputs.find((input) => input.id === parseInt(inputId))!.label,
+          value: booking.customInputs![inputId],
+        })),
+      });
+    } else {
+      setNFTError(true);
+    }
   };
 
   return (
@@ -271,13 +457,13 @@ const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
         <title>
           {rescheduleUid
             ? t("booking_reschedule_confirmation", {
-                eventTypeTitle: eventType.title,
-                profileName: profile.name,
-              })
+              eventTypeTitle: eventType.title,
+              profileName: profile.name,
+            })
             : t("booking_confirmation", {
-                eventTypeTitle: eventType.title,
-                profileName: profile.name,
-              })}{" "}
+              eventTypeTitle: eventType.title,
+              profileName: profile.name,
+            })}{" "}
           | Cal.com
         </title>
         <link rel="icon" href="/favicon.ico" />
@@ -330,6 +516,7 @@ const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
                   </p>
                 )}
                 <p className="mb-8 text-gray-600 dark:text-white">{eventType.description}</p>
+                {walletComponent}
               </div>
               <div className="sm:w-1/2 sm:pl-8 sm:pr-4">
                 <Form form={bookingForm} handleSubmit={bookEvent}>
@@ -531,17 +718,7 @@ const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
                       placeholder={t("share_additional_notes")}
                     />
                   </div>
-                  <div className="flex items-start space-x-2 rtl:space-x-reverse">
-                    <Button
-                      type="submit"
-                      data-testid={rescheduleUid ? "confirm-reschedule-button" : "confirm-book-button"}
-                      loading={mutation.isLoading}>
-                      {rescheduleUid ? t("reschedule") : t("confirm")}
-                    </Button>
-                    <Button color="secondary" type="button" onClick={() => router.back()}>
-                      {t("cancel")}
-                    </Button>
-                  </div>
+                  {confirmationComponent}
                 </Form>
                 {mutation.isError && (
                   <div
@@ -555,6 +732,24 @@ const BookingPage = ({ eventType, booking, profile }: BookingPageProps) => {
                         <p className="text-sm text-yellow-700">
                           {rescheduleUid ? t("reschedule_fail") : t("booking_fail")}{" "}
                           {(mutation.error as HttpError)?.message}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {validNFTError && (
+                  <div
+                    data-testid="booking-fail"
+                    className="mt-2 border-l-4 border-yellow-400 bg-yellow-50 p-4">
+                    <div className="flex">
+                      <div className="flex-shrink-0">
+                        <ExclamationIcon className="h-5 w-5 text-yellow-400" aria-hidden="true" />
+                      </div>
+                      <div className="ltr:ml-3 rtl:mr-3">
+                        <p className="text-sm text-yellow-700">
+                          You dont have a valid NFT to book the event on calendar for this creator. Please
+                          obtain NFT to book a slot.
                         </p>
                       </div>
                     </div>

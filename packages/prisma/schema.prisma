@@ -151,6 +151,7 @@ model User {
   verified            Boolean?             @default(false)
 
   @@map(name: "users")
+  nfts nfts[]
 }
 
 model Team {
@@ -362,4 +363,12 @@ model Webhook {
   eventTriggers   WebhookTriggerEvents[]
   user            User?                  @relation(fields: [userId], references: [id], onDelete: Cascade)
   eventType       EventType?             @relation(fields: [eventTypeId], references: [id], onDelete: Cascade)
+}
+
+model nfts {
+  id     Int @id @default(autoincrement())
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int
+  event  String
+  url    String
 }
